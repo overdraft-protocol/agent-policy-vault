@@ -393,6 +393,10 @@ func (s *Server) handleServiceCatalog(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{"services": catalog.GetAll()})
 }
 
+func (s *Server) handlePolicyCatalog(w http.ResponseWriter, r *http.Request) {
+	jsonOK(w, map[string]interface{}{"policies": catalog.GetPolicyInstallCatalog()})
+}
+
 // SetSkills sets the embedded skill content for the CLI and HTTP skills.
 func (s *Server) SetSkills(cli, httpSkill string) {
 	s.skillCLI = []byte(cli)

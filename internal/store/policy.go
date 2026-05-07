@@ -82,10 +82,14 @@ type PolicyStore interface {
 	// Policies
 	InsertPolicyVersion(ctx context.Context, row PolicyRow) (PolicyRow, error)
 	GetLatestPolicy(ctx context.Context, vaultID, policyID string) (*PolicyRow, error)
+	// GetLatestPolicyAny returns the highest-version row regardless of enabled
+	// (for admin UI when the policy is disabled).
+	GetLatestPolicyAny(ctx context.Context, vaultID, policyID string) (*PolicyRow, error)
 	GetPolicyVersion(ctx context.Context, vaultID, policyID string, version int) (*PolicyRow, error)
 	ListPolicies(ctx context.Context, vaultID string) ([]PolicyRow, error)
 	ListPolicyVersions(ctx context.Context, vaultID, policyID string) ([]PolicyRow, error)
 	DisablePolicy(ctx context.Context, vaultID, policyID string) error
+	EnablePolicy(ctx context.Context, vaultID, policyID string) error
 	NextPolicyVersion(ctx context.Context, vaultID, policyID string) (int, string, error) // returns (version, parent_hash)
 
 	// Grants
@@ -166,6 +170,16 @@ func (s *SQLiteStore) GetLatestPolicy(ctx context.Context, vaultID, policyID str
 	return scanPolicyRow(s.db.QueryRowContext(ctx, q, vaultID, policyID))
 }
 
+func (s *SQLiteStore) GetLatestPolicyAny(ctx context.Context, vaultID, policyID string) (*PolicyRow, error) {
+	const q = `SELECT pk, vault_id, policy_id, version, enabled, yaml_source, content_hash, parent_hash,
+		       description, COALESCE(source_template,''), COALESCE(source_publisher,''),
+		       authored_by, COALESCE(authored_session,''), authored_at
+		FROM policies
+		WHERE vault_id = ? AND policy_id = ?
+		ORDER BY version DESC LIMIT 1`
+	return scanPolicyRow(s.db.QueryRowContext(ctx, q, vaultID, policyID))
+}
+
 func (s *SQLiteStore) GetPolicyVersion(ctx context.Context, vaultID, policyID string, version int) (*PolicyRow, error) {
 	if version <= 0 {
 		return s.GetLatestPolicy(ctx, vaultID, policyID)
@@ -216,6 +230,27 @@ func (s *SQLiteStore) ListPolicyVersions(ctx context.Context, vaultID, policyID 
 func (s *SQLiteStore) DisablePolicy(ctx context.Context, vaultID, policyID string) error {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE policies SET enabled = 0 WHERE vault_id = ? AND policy_id = ? AND enabled = 1`,
+		vaultID, policyID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// EnablePolicy sets enabled=1 on the highest-version row only (the active tip).
+func (s *SQLiteStore) EnablePolicy(ctx context.Context, vaultID, policyID string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE policies SET enabled = 1
+		 WHERE pk = (
+		   SELECT pk FROM policies
+		   WHERE vault_id = ? AND policy_id = ?
+		   ORDER BY version DESC
+		   LIMIT 1
+		 )`,
 		vaultID, policyID)
 	if err != nil {
 		return err
@@ -452,6 +487,27 @@ func sqlNullableTime(t *time.Time) any {
 	return t.UTC().Format(time.RFC3339)
 }
 
+// parseSQLiteTime parses timestamps written by SQLite (e.g. datetime('now')
+// → "2006-01-02 15:04:05") as well as RFC3339 from Go inserts.
+func parseSQLiteTime(s string) (time.Time, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, false
+	}
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04:05.999999999",
+	}
+	for _, layout := range layouts {
+		if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
 func scanPolicyRow(r *sql.Row) (*PolicyRow, error) {
 	var row PolicyRow
 	var enabled int
@@ -468,7 +524,9 @@ func scanPolicyRow(r *sql.Row) (*PolicyRow, error) {
 	if len(parentHash) > 0 {
 		row.ParentHash = string(parentHash)
 	}
-	row.AuthoredAt, _ = time.Parse(time.RFC3339, authoredAt)
+	if t, ok := parseSQLiteTime(authoredAt); ok {
+		row.AuthoredAt = t
+	}
 	return &row, nil
 }
 
@@ -490,7 +548,9 @@ func scanPolicyRows(rows *sql.Rows) ([]PolicyRow, error) {
 		if len(parentHash) > 0 {
 			row.ParentHash = string(parentHash)
 		}
-		row.AuthoredAt, _ = time.Parse(time.RFC3339, authoredAt)
+		if t, ok := parseSQLiteTime(authoredAt); ok {
+			row.AuthoredAt = t
+		}
 		out = append(out, row)
 	}
 	return out, rows.Err()
@@ -508,14 +568,18 @@ func scanGrantRow(r *sql.Row) (*GrantRow, error) {
 	}
 	row.PolicyVersion = policyVersion
 	if expiresAt.Valid {
-		t, _ := time.Parse(time.RFC3339, expiresAt.String)
-		row.ExpiresAt = &t
+		if t, ok := parseSQLiteTime(expiresAt.String); ok {
+			row.ExpiresAt = &t
+		}
 	}
 	if revokedAt.Valid {
-		t, _ := time.Parse(time.RFC3339, revokedAt.String)
-		row.RevokedAt = &t
+		if t, ok := parseSQLiteTime(revokedAt.String); ok {
+			row.RevokedAt = &t
+		}
 	}
-	row.GrantedAt, _ = time.Parse(time.RFC3339, grantedAt)
+	if t, ok := parseSQLiteTime(grantedAt); ok {
+		row.GrantedAt = t
+	}
 	return &row, nil
 }
 
@@ -533,14 +597,18 @@ func scanGrantRows(rows *sql.Rows) ([]GrantRow, error) {
 		}
 		row.PolicyVersion = policyVersion
 		if expiresAt.Valid {
-			t, _ := time.Parse(time.RFC3339, expiresAt.String)
-			row.ExpiresAt = &t
+			if t, ok := parseSQLiteTime(expiresAt.String); ok {
+				row.ExpiresAt = &t
+			}
 		}
 		if revokedAt.Valid {
-			t, _ := time.Parse(time.RFC3339, revokedAt.String)
-			row.RevokedAt = &t
+			if t, ok := parseSQLiteTime(revokedAt.String); ok {
+				row.RevokedAt = &t
+			}
 		}
-		row.GrantedAt, _ = time.Parse(time.RFC3339, grantedAt)
+		if t, ok := parseSQLiteTime(grantedAt); ok {
+			row.GrantedAt = t
+		}
 		out = append(out, row)
 	}
 	return out, rows.Err()

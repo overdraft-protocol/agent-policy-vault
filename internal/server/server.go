@@ -684,6 +684,7 @@ func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, ini
 	// punish `vault run` (CA fetch per invocation) and the dashboard
 	// (re-mount poll) without defending any real surface.
 	mux.HandleFunc("GET /v1/service-catalog", s.requireInitialized(s.handleServiceCatalog))
+	mux.HandleFunc("GET /v1/policy-catalog", s.requireInitialized(s.handlePolicyCatalog))
 	mux.HandleFunc("GET /v1/skills/cli", s.requireInitialized(s.handleSkillCLI))
 	mux.HandleFunc("GET /v1/skills/http", s.requireInitialized(s.handleSkillHTTP))
 	// CA PEM is not wrapped in requireInitialized — the CA lifecycle is
@@ -723,6 +724,7 @@ func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, ini
 	mux.HandleFunc("GET /v1/vaults/{vault}/policies", s.requireInitialized(s.requireAuth(actorAuthed(s.handlePolicyList))))
 	mux.HandleFunc("GET /v1/vaults/{vault}/policies/{id}", s.requireInitialized(s.requireAuth(actorAuthed(s.handlePolicyGet))))
 	mux.HandleFunc("GET /v1/vaults/{vault}/policies/{id}/versions", s.requireInitialized(s.requireAuth(actorAuthed(s.handlePolicyVersions))))
+	mux.HandleFunc("PATCH /v1/vaults/{vault}/policies/{id}", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handlePolicyPatch)))))
 	mux.HandleFunc("DELETE /v1/vaults/{vault}/policies/{id}", s.requireInitialized(s.requireAuth(actorAuthed(s.handlePolicyDisable))))
 	mux.HandleFunc("GET /v1/vaults/{vault}/policy-audit", s.requireInitialized(s.requireAuth(actorAuthed(s.handlePolicyAudit))))
 

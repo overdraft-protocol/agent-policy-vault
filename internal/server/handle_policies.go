@@ -152,7 +152,7 @@ func (s *Server) handlePolicyGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	row, err := s.policyStore.GetLatestPolicy(ctx, ns.ID, id)
+	row, err := s.policyStore.GetLatestPolicyAny(ctx, ns.ID, id)
 	if err != nil || row == nil {
 		jsonError(w, http.StatusNotFound, fmt.Sprintf("Policy %q not found", id))
 		return
@@ -223,6 +223,86 @@ func (s *Server) handlePolicyDisable(w http.ResponseWriter, r *http.Request) {
 		SessionID: sessID,
 	})
 	jsonOK(w, map[string]any{"id": id, "status": "disabled"})
+}
+
+// handlePolicyPatch updates mutable policy fields (today: enabled only).
+func (s *Server) handlePolicyPatch(w http.ResponseWriter, r *http.Request) {
+	if s.policyStore == nil {
+		jsonError(w, http.StatusServiceUnavailable, "Policy engine not enabled")
+		return
+	}
+	ctx := r.Context()
+	ns, ok := s.lookupVault(w, r)
+	if !ok {
+		return
+	}
+	actor, err := s.requirePolicyAuthor(w, r, ns.ID)
+	if err != nil {
+		return
+	}
+	id := r.PathValue("id")
+	var req struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Enabled == nil {
+		jsonError(w, http.StatusBadRequest, "enabled is required")
+		return
+	}
+	if *req.Enabled {
+		if err := s.policyStore.EnablePolicy(ctx, ns.ID, id); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				jsonError(w, http.StatusNotFound, fmt.Sprintf("Policy %q not found", id))
+				return
+			}
+			jsonError(w, http.StatusInternalServerError, "Failed to enable policy: "+err.Error())
+			return
+		}
+		sess := sessionFromContext(ctx)
+		sessID := ""
+		if sess != nil {
+			sessID = sess.ID
+		}
+		_ = s.policyStore.InsertPolicyAudit(ctx, store.PolicyAuditRow{
+			VaultID:   ns.ID,
+			EventType: "policy.enable",
+			PolicyRef: id,
+			ActorID:   actor.ID,
+			ActorType: actor.Type,
+			SessionID: sessID,
+		})
+	} else {
+		if err := s.policyStore.DisablePolicy(ctx, ns.ID, id); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				jsonError(w, http.StatusNotFound, fmt.Sprintf("Policy %q not found or already disabled", id))
+				return
+			}
+			jsonError(w, http.StatusInternalServerError, "Failed to disable policy: "+err.Error())
+			return
+		}
+		sess := sessionFromContext(ctx)
+		sessID := ""
+		if sess != nil {
+			sessID = sess.ID
+		}
+		_ = s.policyStore.InsertPolicyAudit(ctx, store.PolicyAuditRow{
+			VaultID:   ns.ID,
+			EventType: "policy.disable",
+			PolicyRef: id,
+			ActorID:   actor.ID,
+			ActorType: actor.Type,
+			SessionID: sessID,
+		})
+	}
+	row, err := s.policyStore.GetLatestPolicyAny(ctx, ns.ID, id)
+	if err != nil || row == nil {
+		jsonError(w, http.StatusInternalServerError, "Failed to load policy after update")
+		return
+	}
+	jsonOK(w, policyResponse(*row))
 }
 
 // handlePolicyAudit lists recent policy audit rows for a vault.

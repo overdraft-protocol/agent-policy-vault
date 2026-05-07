@@ -53,8 +53,13 @@ export function EmptyState({ message }: { message: string }) {
 
 export function timeAgo(dateStr: string): string {
   const date = new Date(dateStr);
+  const ts = date.getTime();
   const now = new Date();
-  const seconds = Math.floor((now.getTime() - date.getTime()) / 1000);
+  if (!Number.isFinite(ts)) return "—";
+  // Reject ancient or garbage dates (e.g. year 0001 from bad parses).
+  if (date.getUTCFullYear() < 1970) return "—";
+  const seconds = Math.floor((now.getTime() - ts) / 1000);
+  if (seconds < 0) return "Just now";
 
   if (seconds < 60) return "Just now";
   const minutes = Math.floor(seconds / 60);

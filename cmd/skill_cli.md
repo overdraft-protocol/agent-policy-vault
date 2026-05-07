@@ -57,6 +57,8 @@ Response includes `vault`, `services` (host + description), and `available_crede
 
 **Browse service templates:** `agent-vault catalog --json` lists built-in service templates with suggested credential keys and auth types. No auth needed.
 
+**Browse policy install templates (HTTP):** `GET {AGENT_VAULT_ADDR}/v1/policy-catalog` returns built-in policy YAML templates aligned with the service catalog (substitute `{{VAULT}}` / `{{POLICY_ID}}` then `POST` YAML to `/v1/vaults/{vault}/policies`). No auth required. To enable or disable the latest version of a policy without deleting it, `PATCH` that path with `{"enabled":true}` or `false` (vault member/admin). See `skill_http.md`.
+
 ## Making Requests
 
 **Just call the real API URL.** When you were launched via `agent-vault run` (or the long form `agent-vault vault run`), your HTTP and HTTPS traffic already route through Agent Vault transparently — `HTTPS_PROXY`, `HTTP_PROXY`, and the broker's CA cert are pre-configured in your environment. Agent Vault intercepts the call, looks up the host in the vault's services, injects the credential, and forwards to the upstream.

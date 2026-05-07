@@ -23,6 +23,7 @@ import CredentialsTab from "./pages/vault/CredentialsTab";
 import UsersTab from "./pages/vault/UsersTab";
 import AgentsTab from "./pages/vault/AgentsTab";
 import SettingsTab from "./pages/vault/SettingsTab";
+import PoliciesTab from "./pages/vault/PoliciesTab";
 import InstanceLayout from "./components/InstanceLayout";
 import AccountLayout from "./components/AccountLayout";
 import AccountSettingsTab from "./pages/account/SettingsTab";
@@ -299,6 +300,12 @@ const credentialsTabRoute = createRoute({
   component: CredentialsTab,
 });
 
+const policiesTabRoute = createRoute({
+  getParentRoute: () => vaultLayoutRoute,
+  path: "/policies",
+  component: PoliciesTab,
+});
+
 const usersTabRoute = createRoute({
   getParentRoute: () => vaultLayoutRoute,
   path: "/users",
@@ -345,6 +352,7 @@ const routeTree = rootRoute.addChildren([
       logsTabRoute,
       servicesTabRoute,
       credentialsTabRoute,
+      policiesTabRoute,
       usersTabRoute,
       agentsTabRoute,
       settingsTabRoute,
