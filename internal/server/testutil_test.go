@@ -43,3 +43,10 @@ func withNotifier(n *notify.Notifier) testServerOption {
 		srv.notifier = n
 	}
 }
+
+// withPolicyStore enables /v1/vaults/*/policies and /grants routes (PolicyService).
+func withPolicyStore(p PolicyService) testServerOption {
+	return func(srv *Server) {
+		srv.AttachPolicyService(p)
+	}
+}

@@ -216,6 +216,14 @@ func parseAndValidateMount(raw, homeDir string) (parsedMount, error) {
 		return parsedMount{}, fmt.Errorf("--mount %q: dst must be an absolute path", raw)
 	}
 
+	// Reject the standard docker socket paths before EvalSymlinks. On macOS,
+	// /var/run/docker.sock often symlinks into ~/.docker/run; if that target
+	// is absent, EvalSymlinks fails with a generic error instead of the
+	// explicit socket refusal we want for tests and UX.
+	if c := filepath.Clean(m.Src); c == "/var/run/docker.sock" || c == "/private/var/run/docker.sock" {
+		return parsedMount{}, errors.New("--mount: refusing to bind the docker socket (would undo every isolation guarantee)")
+	}
+
 	// EvalSymlinks is the defense against laundering a forbidden path
 	// via a symlink. We validate the resolved target, not the input.
 	resolved, err := filepath.EvalSymlinks(m.Src)

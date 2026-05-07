@@ -39,6 +39,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/ca"
 	"github.com/Infisical/agent-vault/internal/netguard"
+	"github.com/Infisical/agent-vault/internal/policy"
 	"github.com/Infisical/agent-vault/internal/ratelimit"
 	"github.com/Infisical/agent-vault/internal/requestlog"
 )
@@ -57,6 +58,7 @@ type Proxy struct {
 	logger      *slog.Logger
 	rateLimit   *ratelimit.Registry // shared with the HTTP server; nil = no-op
 	logSink     requestlog.Sink     // never nil (Nop default); shared with the HTTP server
+	policy      policy.Engine       // nil = policy gating disabled (legacy mode)
 }
 
 // Options carries the dependencies a Proxy needs. BaseURL is the
@@ -73,6 +75,12 @@ type Options struct {
 	Logger      *slog.Logger
 	RateLimit   *ratelimit.Registry
 	LogSink     requestlog.Sink // nil → Nop
+
+	// Policy is the optional Policy Decision Point. When non-nil the
+	// proxy gates each forwarded request through Engine.Evaluate after
+	// credential resolution and before the upstream RoundTrip. When
+	// nil the proxy operates in legacy (allowlist-only) mode.
+	Policy policy.Engine
 }
 
 // New builds a Proxy bound to addr. The returned Proxy does not begin
@@ -101,6 +109,7 @@ func New(addr string, opts Options) *Proxy {
 		logger:    opts.Logger,
 		rateLimit: opts.RateLimit,
 		logSink:   sink,
+		policy:    opts.Policy,
 	}
 
 	p.tlsConfig = &tls.Config{

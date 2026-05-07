@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Infisical/agent-vault/internal/brokercore"
+	"github.com/Infisical/agent-vault/internal/policy"
 	"github.com/Infisical/agent-vault/internal/ratelimit"
 	"github.com/Infisical/agent-vault/internal/requestlog"
 )
@@ -181,7 +182,7 @@ func (p *Proxy) forwardRequest(
 		RawQuery: r.URL.RawQuery,
 	}
 
-	body, contentLength, err := brokercore.MaterializeRequestBody(r.Body)
+	body, contentLength, bodyBytes, err := materializeRequestBodyWithBytes(r.Body)
 	if err != nil {
 		status, code := brokercore.RequestBodyErrorCode(err)
 		http.Error(w, http.StatusText(status), status)
@@ -222,6 +223,53 @@ func (p *Proxy) forwardRequest(
 		brokercore.WriteInjectError(w, err, host, scope.VaultName, p.baseURL)
 		emit(status, errCode)
 		return
+	}
+
+	// Policy decision point. Runs only when an Engine is wired and a
+	// concrete service matched (passthrough requests bypass policy:
+	// they have no credential to gate). Fail-closed on Engine errors.
+	var policyDecision policy.Decision
+	if p.policy != nil && !inject.Passthrough {
+		credKey := ""
+		if len(inject.CredentialKeys) > 0 {
+			credKey = inject.CredentialKeys[0]
+		}
+		actorType, actorID := actorFromScope(scope)
+		policyDecision, err = p.policy.Evaluate(r.Context(), policy.EvalContext{
+			VaultID:       scope.VaultID,
+			ActorType:     actorType,
+			ActorID:       actorID,
+			TargetHost:    host,
+			MatchedHost:   inject.MatchedHost,
+			CredentialKey: credKey,
+			Method:        r.Method,
+			Path:          r.URL.Path,
+			RawQuery:      r.URL.RawQuery,
+			Body:          bodyBytes,
+			Now:           time.Now(),
+		})
+		if err != nil || !policyDecision.Allow {
+			reason := "policy_denied"
+			if err != nil {
+				p.logger.Warn("policy engine error",
+					slog.String("vault_id", scope.VaultID),
+					slog.String("actor", actorID),
+					slog.String("error", err.Error()),
+				)
+				reason = "policy_engine_error"
+			} else {
+				p.logger.Info("policy denied request",
+					slog.String("vault_id", scope.VaultID),
+					slog.String("actor", actorID),
+					slog.String("policy", policyDecision.PolicyID),
+					slog.String("rule", policyDecision.RuleID),
+					slog.String("grant", policyDecision.GrantID),
+				)
+			}
+			http.Error(w, "policy denied: "+policyDecision.Reason, http.StatusForbidden)
+			emit(http.StatusForbidden, reason)
+			return
+		}
 	}
 
 	wsUpgrade := isWebSocketUpgrade(r)
@@ -281,4 +329,7 @@ func (p *Proxy) forwardRequest(
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, io.LimitReader(resp.Body, brokercore.MaxResponseBytes))
 	emit(resp.StatusCode, "")
+	if p.policy != nil && policyDecision.Allow {
+		_ = p.policy.OnRequestCompleted(r.Context(), policyDecision.GrantID, policyDecision.PolicyID, 0, resp.StatusCode)
+	}
 }

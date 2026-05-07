@@ -22,6 +22,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/mitm"
 	"github.com/Infisical/agent-vault/internal/notify"
 	"github.com/Infisical/agent-vault/internal/pidfile"
+	"github.com/Infisical/agent-vault/internal/policy"
 	"github.com/Infisical/agent-vault/internal/requestlog"
 	"github.com/Infisical/agent-vault/internal/server"
 	"github.com/Infisical/agent-vault/internal/store"
@@ -153,9 +154,14 @@ var serverCmd = &cobra.Command{
 		notifier := notify.New(smtpCfg)
 		srv := server.New(addr, db, masterKey.Key(), notifier, initialized, baseURL, logger)
 		srv.SetSkills(skillCLI, skillHTTP)
+		// Wire policy engine: bind the SQLite-backed policy/grant
+		// store to the HTTP server so the management endpoints
+		// activate. The MITM proxy gets the same engine via
+		// attachMITMIfEnabled below.
+		srv.AttachPolicyService(db)
 		shutdownLogs := attachLogSink(srv, db, logger)
 		defer shutdownLogs()
-		if err := attachMITMIfEnabled(srv, host, mitmPort, masterKey.Key()); err != nil {
+		if err := attachMITMIfEnabled(srv, host, mitmPort, masterKey.Key(), db); err != nil {
 			return err
 		}
 		return srv.Start()
@@ -170,7 +176,7 @@ var serverCmd = &cobra.Command{
 // in server.Start: since the MITM proxy is default-on, environments that
 // cannot create ~/.agent-vault/ca/ (read-only FS, containers without HOME,
 // corrupted state) must still be able to run the core HTTP server.
-func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKey []byte) error {
+func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKey []byte, db *store.SQLiteStore) error {
 	if mitmPort <= 0 {
 		return nil
 	}
@@ -179,6 +185,13 @@ func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKe
 		fmt.Fprintf(os.Stderr, "warning: transparent proxy disabled (CA init failed: %v); pass --mitm-port 0 to suppress\n", err)
 		return nil
 	}
+	// Build the policy engine over the same SQLite store the
+	// management API writes to. PolicyBridge translates store row
+	// types to the DTOs the engine consumes, avoiding an import
+	// cycle between internal/policy and internal/store.
+	bridge := store.NewPolicyBridge(db)
+	adapter := policy.NewStoreAdapter(bridge)
+	engine := policy.NewEngine(adapter, adapter, adapter)
 	srv.AttachMITM(mitm.New(
 		net.JoinHostPort(host, strconv.Itoa(mitmPort)),
 		mitm.Options{
@@ -189,6 +202,7 @@ func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKe
 			Logger:      srv.Logger(),
 			RateLimit:   srv.RateLimit(),
 			LogSink:     srv.LogSink(),
+			Policy:      engine,
 		},
 	))
 	return nil
@@ -469,9 +483,10 @@ func runDetachedChild(host, addr string, mitmPort int, logger *slog.Logger) erro
 	notifier := notify.New(smtpCfg)
 	srv := server.New(addr, db, key, notifier, initialized, baseURL, logger)
 	srv.SetSkills(skillCLI, skillHTTP)
+	srv.AttachPolicyService(db)
 	shutdownLogs := attachLogSink(srv, db, logger)
 	defer shutdownLogs()
-	if err := attachMITMIfEnabled(srv, host, mitmPort, key); err != nil {
+	if err := attachMITMIfEnabled(srv, host, mitmPort, key, db); err != nil {
 		return err
 	}
 	return srv.Start()

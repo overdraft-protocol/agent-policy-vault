@@ -31,6 +31,7 @@ Agent Vault takes a different approach: **Agent Vault never reveals vault-stored
 - **Works with any agent** - Custom Python/TypeScript agents, sandboxed processes, and coding agents like Claude Code, Cursor, and Codex. Anything that speaks HTTP — including streaming responses and WebSocket-based voice/realtime APIs (e.g. OpenAI Realtime).
 - **Encrypted at rest** - Credentials are encrypted with AES-256-GCM using a random data encryption key (DEK). An optional master password wraps the DEK via Argon2id, so rotating the password does not re-encrypt credentials. A passwordless mode is available for PaaS deploys.
 - **Request logs** - Every proxied request is persisted per vault with method, host, path, status, latency, and the credential key names involved. Bodies, headers, and query strings are not recorded. Retention is configurable per vault.
+- **Policy engine (this fork)** - Declarative per-agent grants and policies can restrict methods, paths, JSON body fields, rate, and time-of-day before credentials are applied. See [docs/policy-engine.md](docs/policy-engine.md).
 
 ## Installation
 

@@ -66,6 +66,7 @@ type Server struct {
 	logger         *slog.Logger         // structured logger for per-request observability
 	rateLimit      *ratelimit.Registry  // tiered rate limiter; shared with the MITM ingress
 	logSink        requestlog.Sink      // per-request persistence sink; never nil (Nop default)
+	policyStore    PolicyService        // optional policy/grant persistence; nil disables /v1/vaults/*/policies
 	// touchCache short-circuits per-request session-touch writes. With
 	// db.SetMaxOpenConns(1), every UPDATE — even a no-op — opens the
 	// single WAL writer slot. Caching the last-touch wall-clock per
@@ -712,6 +713,23 @@ func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, ini
 
 	// Email
 	mux.HandleFunc("POST /v1/admin/email/test", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleEmailTest)))))
+
+	// Policy engine: policies + grants. Mutations require a user
+	// session with vault member+ role; agents (proxy or otherwise)
+	// cannot author or revoke. Reads are allowed for any vault
+	// member, including agents (so they can introspect what they're
+	// allowed to do).
+	mux.HandleFunc("POST /v1/vaults/{vault}/policies", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handlePolicyCreate)))))
+	mux.HandleFunc("GET /v1/vaults/{vault}/policies", s.requireInitialized(s.requireAuth(actorAuthed(s.handlePolicyList))))
+	mux.HandleFunc("GET /v1/vaults/{vault}/policies/{id}", s.requireInitialized(s.requireAuth(actorAuthed(s.handlePolicyGet))))
+	mux.HandleFunc("GET /v1/vaults/{vault}/policies/{id}/versions", s.requireInitialized(s.requireAuth(actorAuthed(s.handlePolicyVersions))))
+	mux.HandleFunc("DELETE /v1/vaults/{vault}/policies/{id}", s.requireInitialized(s.requireAuth(actorAuthed(s.handlePolicyDisable))))
+	mux.HandleFunc("GET /v1/vaults/{vault}/policy-audit", s.requireInitialized(s.requireAuth(actorAuthed(s.handlePolicyAudit))))
+
+	mux.HandleFunc("POST /v1/vaults/{vault}/grants", s.requireInitialized(s.requireAuth(actorAuthed(limitBody(s.handleGrantCreate)))))
+	mux.HandleFunc("GET /v1/vaults/{vault}/grants", s.requireInitialized(s.requireAuth(actorAuthed(s.handleGrantList))))
+	mux.HandleFunc("GET /v1/vaults/{vault}/grants/{id}", s.requireInitialized(s.requireAuth(actorAuthed(s.handleGrantGet))))
+	mux.HandleFunc("DELETE /v1/vaults/{vault}/grants/{id}", s.requireInitialized(s.requireAuth(actorAuthed(s.handleGrantRevoke))))
 
 	mux.HandleFunc("POST /v1/auth/logout", s.requireInitialized(ipAuth(s.handleLogout)))
 

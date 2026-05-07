@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:infisical.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(git clone https://github.com/Infisical/agent-vault.git .)",
+      "Bash(go version)",
+      "Bash(go build ./internal/policy/...)",
+      "Bash(go build ./internal/store/...)",
+      "Bash(go build ./internal/...)",
+      "Bash(go build ./...)",
+      "Bash(go vet ./...)",
+      "Bash(go test ./internal/policy/ -run TestLoad -count=1)",
+      "Bash(go test ./internal/policy/ -run TestLoadPolicy_RejectsMalformed -v -count=1)",
+      "Bash(go test ./internal/policy/ -count=1)",
+      "Bash(go test ./internal/policy/ -count=1 -v)"
+    ]
+  }
+}
