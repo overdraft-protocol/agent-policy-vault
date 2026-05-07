@@ -175,12 +175,21 @@ func (m *mockStore) RevokeUserSession(_ context.Context, userID, publicID string
 	return sql.ErrNoRows
 }
 
-func (m *mockStore) CreateScopedSession(_ context.Context, vaultID, vaultRole string, expiresAt *time.Time) (*store.Session, error) {
+func (m *mockStore) CreateScopedSession(_ context.Context, p store.CreateScopedSessionParams) (*store.Session, error) {
+	if p.UserID != "" && p.AgentID != "" {
+		return nil, fmt.Errorf("CreateScopedSession: user_id and agent_id are mutually exclusive")
+	}
+	if p.UserID == "" && p.AgentID == "" {
+		return nil, fmt.Errorf("CreateScopedSession: user_id or agent_id is required")
+	}
+	m.sessionCounter++
 	s := &store.Session{
-		ID:        "scoped-session-id",
-		VaultID:   vaultID,
-		VaultRole: vaultRole,
-		ExpiresAt: expiresAt,
+		ID:        fmt.Sprintf("scoped-session-id-%d", m.sessionCounter),
+		VaultID:   p.VaultID,
+		VaultRole: p.VaultRole,
+		UserID:    p.UserID,
+		AgentID:   p.AgentID,
+		ExpiresAt: p.ExpiresAt,
 		CreatedAt: time.Now(),
 	}
 	m.sessions[s.ID] = s
@@ -1940,6 +1949,12 @@ func TestScopedSessionSuccess(t *testing.T) {
 	if scopedSess.VaultRole != "proxy" {
 		t.Fatalf("expected vault_role proxy, got %q", scopedSess.VaultRole)
 	}
+	if scopedSess.UserID != "owner-user-id" {
+		t.Fatalf("expected minting user_id owner-user-id on scoped session, got %q", scopedSess.UserID)
+	}
+	if scopedSess.AgentID != "" {
+		t.Fatalf("expected empty agent_id on user-minted scoped session, got %q", scopedSess.AgentID)
+	}
 }
 
 func TestScopedSessionExplicitRole(t *testing.T) {
@@ -1967,6 +1982,9 @@ func TestScopedSessionExplicitRole(t *testing.T) {
 	}
 	if scopedSess.VaultRole != "admin" {
 		t.Fatalf("expected vault_role admin, got %q", scopedSess.VaultRole)
+	}
+	if scopedSess.UserID != "owner-user-id" {
+		t.Fatalf("expected minting user_id on scoped session, got %q", scopedSess.UserID)
 	}
 }
 
@@ -2035,6 +2053,9 @@ func TestScopedSessionMemberGetsMember(t *testing.T) {
 	if scopedSess.VaultRole != "member" {
 		t.Fatalf("expected vault_role member, got %q", scopedSess.VaultRole)
 	}
+	if scopedSess.UserID != "member-user-id" {
+		t.Fatalf("expected minting user_id member-user-id, got %q", scopedSess.UserID)
+	}
 }
 
 func TestScopedSessionVaultNotFound(t *testing.T) {
@@ -2077,12 +2098,26 @@ func setupMockStoreWithScopedSession(t *testing.T, vaultName, vaultID string) (*
 func setupMockStoreWithScopedSessionRole(t *testing.T, vaultName, vaultID, role string) (*mockStore, string) {
 	t.Helper()
 	ms := newMockStore()
+	// Instance-level member (not owner) so owner-only admin routes still return 403,
+	// while vault admin grants allow vault-scoped API tests.
+	const actorID = "scoped-vault-user-id"
+	ms.users["scoped-vault-user@test.com"] = &store.User{
+		ID: actorID, Email: "scoped-vault-user@test.com",
+		Role: "member", IsActive: true,
+	}
+	_ = ms.GrantVaultRole(context.Background(), actorID, "user", "root-ns-id", "admin")
 	// Add a second vault
 	if vaultName != "default" {
 		ms.vaults[vaultName] = &store.Vault{ID: vaultID, Name: vaultName}
+		_ = ms.GrantVaultRole(context.Background(), actorID, "user", vaultID, "admin")
 	}
 	// Create a scoped session locked to the given vault
-	sess, err := ms.CreateScopedSession(context.Background(), vaultID, role, tp(time.Now().Add(time.Hour)))
+	sess, err := ms.CreateScopedSession(context.Background(), store.CreateScopedSessionParams{
+		VaultID:   vaultID,
+		VaultRole: role,
+		UserID:    actorID,
+		ExpiresAt: tp(time.Now().Add(time.Hour)),
+	})
 	if err != nil {
 		t.Fatalf("CreateScopedSession: %v", err)
 	}
@@ -2419,7 +2454,18 @@ func setupVaultWithCredential(t *testing.T, servicesJSON string) (*mockStore, st
 	ms := newMockStore()
 	encKey := make([]byte, 32)
 
-	sess, err := ms.CreateScopedSession(context.Background(), "root-ns-id", "proxy", tp(time.Now().Add(time.Hour)))
+	ms.users["discover-owner@test.com"] = &store.User{
+		ID: "discover-user-id", Email: "discover-owner@test.com",
+		Role: "owner", IsActive: true,
+	}
+	_ = ms.GrantVaultRole(context.Background(), "discover-user-id", "user", "root-ns-id", "admin")
+
+	sess, err := ms.CreateScopedSession(context.Background(), store.CreateScopedSessionParams{
+		VaultID:   "root-ns-id",
+		VaultRole: "proxy",
+		UserID:    "discover-user-id",
+		ExpiresAt: tp(time.Now().Add(time.Hour)),
+	})
 	if err != nil {
 		t.Fatalf("CreateScopedSession: %v", err)
 	}
@@ -2545,7 +2591,17 @@ func TestDiscoverEmptyRules(t *testing.T) {
 
 func TestDiscoverNoCredentials(t *testing.T) {
 	ms := newMockStore()
-	sess, err := ms.CreateScopedSession(context.Background(), "root-ns-id", "proxy", tp(time.Now().Add(time.Hour)))
+	ms.users["dc-owner@test.com"] = &store.User{
+		ID: "dc-user-id", Email: "dc-owner@test.com",
+		Role: "owner", IsActive: true,
+	}
+	_ = ms.GrantVaultRole(context.Background(), "dc-user-id", "user", "root-ns-id", "admin")
+	sess, err := ms.CreateScopedSession(context.Background(), store.CreateScopedSessionParams{
+		VaultID:   "root-ns-id",
+		VaultRole: "proxy",
+		UserID:    "dc-user-id",
+		ExpiresAt: tp(time.Now().Add(time.Hour)),
+	})
 	if err != nil {
 		t.Fatalf("CreateScopedSession: %v", err)
 	}

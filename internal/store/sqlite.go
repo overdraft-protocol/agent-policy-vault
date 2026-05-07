@@ -789,25 +789,52 @@ func (s *SQLiteStore) CreateUserSession(ctx context.Context, p CreateUserSession
 	}, nil
 }
 
-func (s *SQLiteStore) CreateScopedSession(ctx context.Context, vaultID, vaultRole string, expiresAt *time.Time) (*Session, error) {
+func (s *SQLiteStore) CreateScopedSession(ctx context.Context, p CreateScopedSessionParams) (*Session, error) {
+	if p.UserID != "" && p.AgentID != "" {
+		return nil, fmt.Errorf("CreateScopedSession: user_id and agent_id are mutually exclusive")
+	}
+	if p.UserID == "" && p.AgentID == "" {
+		return nil, fmt.Errorf("CreateScopedSession: user_id or agent_id is required")
+	}
+	if p.VaultID == "" {
+		return nil, fmt.Errorf("CreateScopedSession: vault_id is required")
+	}
 	rawToken := newSessionToken()
 	tokenHash := hashSessionToken(rawToken)
 	now := time.Now().UTC()
 
 	var expiresAtStr sql.NullString
-	if expiresAt != nil {
-		expiresAtStr = sql.NullString{String: expiresAt.UTC().Format(time.DateTime), Valid: true}
+	if p.ExpiresAt != nil {
+		expiresAtStr = sql.NullString{String: p.ExpiresAt.UTC().Format(time.DateTime), Valid: true}
+	}
+
+	var userArg any
+	if p.UserID != "" {
+		userArg = p.UserID
+	}
+	var agentArg any
+	if p.AgentID != "" {
+		agentArg = p.AgentID
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		"INSERT INTO sessions (id, vault_id, vault_role, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
-		tokenHash, vaultID, vaultRole, expiresAtStr, now.Format(time.DateTime),
+		`INSERT INTO sessions (id, vault_id, vault_role, user_id, agent_id, expires_at, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		tokenHash, p.VaultID, p.VaultRole, userArg, agentArg, expiresAtStr, now.Format(time.DateTime),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating scoped session: %w", err)
 	}
 
-	return &Session{ID: rawToken, VaultID: vaultID, VaultRole: vaultRole, ExpiresAt: utcTimePtr(expiresAt), CreatedAt: now}, nil
+	return &Session{
+		ID:        rawToken,
+		UserID:    p.UserID,
+		AgentID:   p.AgentID,
+		VaultID:   p.VaultID,
+		VaultRole: p.VaultRole,
+		ExpiresAt: utcTimePtr(p.ExpiresAt),
+		CreatedAt: now,
+	}, nil
 }
 
 func (s *SQLiteStore) GetSession(ctx context.Context, rawToken string) (*Session, error) {

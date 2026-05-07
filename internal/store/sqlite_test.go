@@ -338,7 +338,17 @@ func TestScopedSessionCRUD(t *testing.T) {
 
 	expires := time.Now().Add(1 * time.Hour).UTC().Truncate(time.Second)
 
-	sess, err := s.CreateScopedSession(ctx, ns.ID, "proxy", &expires)
+	u, err := s.CreateUser(ctx, "scoped-session@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	sess, err := s.CreateScopedSession(ctx, CreateScopedSessionParams{
+		VaultID:   ns.ID,
+		VaultRole: "proxy",
+		UserID:    u.ID,
+		ExpiresAt: &expires,
+	})
 	if err != nil {
 		t.Fatalf("CreateScopedSession: %v", err)
 	}
@@ -348,6 +358,9 @@ func TestScopedSessionCRUD(t *testing.T) {
 	if sess.VaultID != ns.ID {
 		t.Fatalf("expected VaultID %s, got %s", ns.ID, sess.VaultID)
 	}
+	if sess.UserID != u.ID {
+		t.Fatalf("expected UserID %s on create return, got %q", u.ID, sess.UserID)
+	}
 
 	got, err := s.GetSession(ctx, sess.ID)
 	if err != nil {
@@ -356,8 +369,32 @@ func TestScopedSessionCRUD(t *testing.T) {
 	if got.VaultID != ns.ID {
 		t.Fatalf("expected VaultID %s on get, got %s", ns.ID, got.VaultID)
 	}
+	if got.UserID != u.ID {
+		t.Fatalf("expected UserID %s on get, got %q", u.ID, got.UserID)
+	}
+	if got.AgentID != "" {
+		t.Fatalf("expected empty agent_id for user-minted scoped session, got %q", got.AgentID)
+	}
 	if got.ExpiresAt == nil || !got.ExpiresAt.Equal(expires) {
 		t.Fatalf("expected ExpiresAt %v, got %v", expires, got.ExpiresAt)
+	}
+}
+
+func TestCreateScopedSessionRequiresMintingActor(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	ns, err := s.GetVault(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetVault: %v", err)
+	}
+	expires := time.Now().Add(time.Hour).UTC()
+	_, err = s.CreateScopedSession(ctx, CreateScopedSessionParams{
+		VaultID:   ns.ID,
+		VaultRole: "proxy",
+		ExpiresAt: &expires,
+	})
+	if err == nil {
+		t.Fatal("expected error when both user_id and agent_id are empty")
 	}
 }
 
@@ -1829,19 +1866,34 @@ func TestCreateAgentToken(t *testing.T) {
 }
 
 func TestGetSessionBackwardCompat(t *testing.T) {
-	// Old sessions (pre-agent) should still work with NULL agent_id.
+	// User-minted scoped sessions have user_id set and NULL agent_id.
 	s := openTestDB(t)
 	ctx := context.Background()
 
 	ns, _ := s.GetVault(ctx, "default")
-	sess, _ := s.CreateScopedSession(ctx, ns.ID, "proxy", tp(time.Now().Add(24*time.Hour)))
+	u, err := s.CreateUser(ctx, "backward-scoped@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	sess, err := s.CreateScopedSession(ctx, CreateScopedSessionParams{
+		VaultID:   ns.ID,
+		VaultRole: "proxy",
+		UserID:    u.ID,
+		ExpiresAt: tp(time.Now().Add(24 * time.Hour)),
+	})
+	if err != nil {
+		t.Fatalf("CreateScopedSession: %v", err)
+	}
 
 	fetched, err := s.GetSession(ctx, sess.ID)
 	if err != nil {
 		t.Fatalf("GetSession: %v", err)
 	}
+	if fetched.UserID != u.ID {
+		t.Fatalf("expected user_id %s, got %q", u.ID, fetched.UserID)
+	}
 	if fetched.AgentID != "" {
-		t.Fatalf("expected empty agent_id for old session, got %q", fetched.AgentID)
+		t.Fatalf("expected empty agent_id for user-minted scoped session, got %q", fetched.AgentID)
 	}
 }
 

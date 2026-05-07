@@ -82,7 +82,29 @@ func (s *Server) handleScopedSession(w http.ResponseWriter, r *http.Request) {
 		expiresAt = &t
 	}
 
-	sess, err := s.store.CreateScopedSession(ctx, ns.ID, cappedRole, expiresAt)
+	userID, agentID := parentSess.UserID, parentSess.AgentID
+	if userID == "" && agentID == "" {
+		actor, aerr := s.actorFromSession(ctx, parentSess)
+		if aerr == nil && actor != nil {
+			if actor.Type == "user" {
+				userID = actor.ID
+			} else if actor.Type == "agent" {
+				agentID = actor.ID
+			}
+		}
+	}
+	if userID == "" && agentID == "" {
+		jsonError(w, http.StatusForbidden, "Cannot mint a delegated session: the current token has no associated user or agent. Re-authenticate or use a user or agent session.")
+		return
+	}
+
+	sess, err := s.store.CreateScopedSession(ctx, store.CreateScopedSessionParams{
+		VaultID:   ns.ID,
+		VaultRole: cappedRole,
+		UserID:    userID,
+		AgentID:   agentID,
+		ExpiresAt: expiresAt,
+	})
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "Failed to create scoped session")
 		return

@@ -109,6 +109,17 @@ type CreateUserSessionParams struct {
 	LastUserAgent string
 }
 
+// CreateScopedSessionParams carries fields for POST /v1/sessions minted
+// tokens. Exactly one of UserID or AgentID must be set (the minting
+// principal) so proxy policy evaluation can resolve an actor.
+type CreateScopedSessionParams struct {
+	VaultID   string
+	VaultRole string
+	UserID    string // minting user; empty when AgentID is set
+	AgentID   string // minting agent; empty when UserID is set
+	ExpiresAt *time.Time
+}
+
 // User represents a human user account.
 type User struct {
 	ID           string
@@ -320,7 +331,7 @@ type Store interface {
 
 	// Sessions
 	CreateUserSession(ctx context.Context, p CreateUserSessionParams) (*Session, error)
-	CreateScopedSession(ctx context.Context, vaultID, vaultRole string, expiresAt *time.Time) (*Session, error)
+	CreateScopedSession(ctx context.Context, p CreateScopedSessionParams) (*Session, error)
 	GetSession(ctx context.Context, id string) (*Session, error)
 	DeleteSession(ctx context.Context, id string) error
 	// TouchSession bumps last_used_at for the given raw token and
