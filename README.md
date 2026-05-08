@@ -13,6 +13,16 @@ Agents should not possess credentials. Agent Vault eliminates credential exfiltr
 <strong>New here? The <a href="https://infisical.com/blog/agent-vault-the-open-source-credential-proxy-and-vault-for-agents">launch blog post</a> has the full story behind Agent Vault.</strong>
 </p>
 
+> ## This fork: policy-enforced scoped credential access
+>
+> This fork adds **Policies + Grants** so access is scoped per agent and per request before credentials are injected.
+>
+> - **Constrain blast radius for rogue agents** — even if an agent is compromised, policies can deny out-of-scope methods/paths/fields/rate windows.
+> - **Keep compliant agents autonomous** — compliant requests are approved automatically at the proxy layer, so agents can complete end-to-end work with **no human in the loop**.
+> - **Never expose secrets to the agent** — credentials stay brokered and injected by Agent Vault at request time.
+>
+> Why this matters: a credential by itself is often very broad for a specific agent (for example, a wallet private key or an unscoped Stripe API key). Policies and grants let you keep a credential in vault storage while scoping what each agent can do with it using HTTP methods and path patterns (plus optional body/rate/time constraints).
+
 <p align="center">
 <a href="https://docs.agent-vault.dev">Documentation</a> | <a href="https://docs.agent-vault.dev/installation">Installation</a> | <a href="https://docs.agent-vault.dev/reference/cli">CLI Reference</a> | <a href="https://infisical.com/slack">Slack</a>
 </p>
@@ -31,7 +41,7 @@ Agent Vault takes a different approach: **Agent Vault never reveals vault-stored
 - **Works with any agent** - Custom Python/TypeScript agents, sandboxed processes, and coding agents like Claude Code, Cursor, and Codex. Anything that speaks HTTP — including streaming responses and WebSocket-based voice/realtime APIs (e.g. OpenAI Realtime).
 - **Encrypted at rest** - Credentials are encrypted with AES-256-GCM using a random data encryption key (DEK). An optional master password wraps the DEK via Argon2id, so rotating the password does not re-encrypt credentials. A passwordless mode is available for PaaS deploys.
 - **Request logs** - Every proxied request is persisted per vault with method, host, path, status, latency, and the credential key names involved. Bodies, headers, and query strings are not recorded. Retention is configurable per vault.
-- **Policy engine (this fork)** - Declarative per-agent grants and policies can restrict methods, paths, JSON body fields, rate, and time-of-day before credentials are applied. See [docs/policy-engine.md](docs/policy-engine.md).
+- **Policy engine (this fork)** - Declarative per-agent grants and policies enforce scoped access before credentials are applied. You can constrain method/path/body/rate/time windows to limit blast radius while still letting compliant agents run fully autonomously. See [docs/policy-engine.md](docs/policy-engine.md).
 
 ## Installation
 
