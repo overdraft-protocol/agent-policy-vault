@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -20,9 +21,9 @@ type grantCreateRequest struct {
 	// YAML form is convenient for the CLI.
 	Source string `json:"source,omitempty"`
 
-	SubjectType   string `json:"subject_type,omitempty"`   // "agent" | "user"
-	SubjectID     string `json:"subject_id,omitempty"`     // agent/user id
-	SubjectName   string `json:"subject_name,omitempty"`   // resolved server-side if SubjectID empty
+	SubjectType   string `json:"subject_type,omitempty"` // "agent" | "user"
+	SubjectID     string `json:"subject_id,omitempty"`   // agent/user id
+	SubjectName   string `json:"subject_name,omitempty"` // resolved server-side if SubjectID empty
 	PolicyID      string `json:"policy_id,omitempty"`
 	PolicyVersion int    `json:"policy_version,omitempty"` // 0 = always-latest
 	ExpiresAt     string `json:"expires_at,omitempty"`     // RFC3339; "" = no expiry
@@ -162,7 +163,12 @@ func (s *Server) handleGrantCreate(w http.ResponseWriter, r *http.Request) {
 		SessionID: sessID,
 	})
 
-	jsonCreated(w, grantResponse(saved))
+	subjectNames, err := s.resolveGrantSubjectNames(ctx, []store.GrantRow{saved})
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "Failed to resolve grant subject")
+		return
+	}
+	jsonCreated(w, grantResponse(saved, subjectNames, store.GrantDecisionStat{}))
 }
 
 func (s *Server) handleGrantList(w http.ResponseWriter, r *http.Request) {
@@ -203,9 +209,23 @@ func (s *Server) handleGrantList(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusInternalServerError, "Failed to list grants")
 		return
 	}
+	subjectNames, err := s.resolveGrantSubjectNames(ctx, rows)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "Failed to resolve grant subjects")
+		return
+	}
+	decisionCounts, err := s.policyStore.ListGrantDecisionStats(ctx, ns.ID)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "Failed to load grant decision counts")
+		return
+	}
+	decisionByGrantID := make(map[string]store.GrantDecisionStat, len(decisionCounts))
+	for _, d := range decisionCounts {
+		decisionByGrantID[d.GrantID] = d
+	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, g := range rows {
-		out = append(out, grantResponse(g))
+		out = append(out, grantResponse(g, subjectNames, decisionByGrantID[g.ID]))
 	}
 	jsonOK(w, map[string]any{"grants": out})
 }
@@ -229,7 +249,24 @@ func (s *Server) handleGrantGet(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, fmt.Sprintf("Grant %q not found", id))
 		return
 	}
-	jsonOK(w, grantResponse(*row))
+	subjectNames, err := s.resolveGrantSubjectNames(ctx, []store.GrantRow{*row})
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "Failed to resolve grant subject")
+		return
+	}
+	decisionCounts, err := s.policyStore.ListGrantDecisionStats(ctx, ns.ID)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "Failed to load grant decision counts")
+		return
+	}
+	var decisionStat store.GrantDecisionStat
+	for _, d := range decisionCounts {
+		if d.GrantID == row.ID {
+			decisionStat = d
+			break
+		}
+	}
+	jsonOK(w, grantResponse(*row, subjectNames, decisionStat))
 }
 
 func (s *Server) handleGrantRevoke(w http.ResponseWriter, r *http.Request) {
@@ -316,16 +353,49 @@ func looksLikeAgentID(s string) bool {
 	return true
 }
 
-func grantResponse(g store.GrantRow) map[string]any {
+func (s *Server) resolveGrantSubjectNames(ctx context.Context, rows []store.GrantRow) (map[string]string, error) {
+	out := make(map[string]string, len(rows))
+	for _, g := range rows {
+		k := g.SubjectType + ":" + g.SubjectID
+		if _, ok := out[k]; ok {
+			continue
+		}
+		switch g.SubjectType {
+		case "agent":
+			ag, err := s.store.GetAgentByID(ctx, g.SubjectID)
+			if err != nil {
+				return nil, err
+			}
+			if ag != nil {
+				out[k] = ag.Name
+			}
+		case "user":
+			u, err := s.store.GetUserByID(ctx, g.SubjectID)
+			if err != nil {
+				return nil, err
+			}
+			if u != nil {
+				out[k] = u.Email
+			}
+		}
+	}
+	return out, nil
+}
+
+func grantResponse(g store.GrantRow, subjectNames map[string]string, decisionStat store.GrantDecisionStat) map[string]any {
+	k := g.SubjectType + ":" + g.SubjectID
 	out := map[string]any{
-		"id":             g.ID,
-		"subject_type":   g.SubjectType,
-		"subject_id":     g.SubjectID,
-		"policy_id":      g.PolicyID,
-		"policy_version": g.PolicyVersion,
-		"conditions":     json.RawMessage(g.Conditions),
-		"granted_by":     g.GrantedBy,
-		"granted_at":     g.GrantedAt.Format(time.RFC3339),
+		"id":                   g.ID,
+		"subject_type":         g.SubjectType,
+		"subject_id":           g.SubjectID,
+		"subject_name":         subjectNames[k],
+		"policy_id":            g.PolicyID,
+		"policy_version":       g.PolicyVersion,
+		"conditions":           json.RawMessage(g.Conditions),
+		"granted_by":           g.GrantedBy,
+		"granted_at":           g.GrantedAt.Format(time.RFC3339),
+		"decision_allow_count": decisionStat.AllowCount,
+		"decision_deny_count":  decisionStat.DenyCount,
 	}
 	if g.ExpiresAt != nil {
 		out["expires_at"] = g.ExpiresAt.Format(time.RFC3339)

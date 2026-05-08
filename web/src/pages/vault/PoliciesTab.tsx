@@ -424,6 +424,7 @@ interface GrantRow {
   id: string;
   subject_type: string;
   subject_id: string;
+  subject_name?: string;
   policy_id: string;
   policy_version: number;
   conditions?: Record<string, unknown>;
@@ -432,6 +433,8 @@ interface GrantRow {
   expires_at?: string;
   revoked_at?: string;
   revoked_by?: string;
+  decision_allow_count?: number;
+  decision_deny_count?: number;
 }
 
 type OpenPolicyEditor = {
@@ -440,6 +443,17 @@ type OpenPolicyEditor = {
   form: PolicyFormState;
   parseError?: string;
 };
+
+function conditionLabel(key: string): string {
+  return key
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function hasGrantConditions(conditions: GrantRow["conditions"]): boolean {
+  if (!conditions) return false;
+  return Object.keys(conditions).length > 0;
+}
 
 function PolicyEditorBody({
   editor,
@@ -466,6 +480,7 @@ function PolicyEditorBody({
   const catalogHosts = new Set(vaultServices.map((s) => s.host));
   const orphanHost = Boolean(form.serviceHost && !catalogHosts.has(form.serviceHost));
   const [openRuleIdx, setOpenRuleIdx] = useState(0);
+  const [editingRuleNameIdx, setEditingRuleNameIdx] = useState<number | null>(null);
 
   return (
     <div className="space-y-5">
@@ -561,28 +576,89 @@ function PolicyEditorBody({
               const allMethods = rule.methods.length === 0;
               return (
                 <div
-                  key={`${rule.id}-${idx}`}
+                  key={`rule-${idx}`}
                   className="rounded-lg border border-border bg-bg/20 overflow-hidden"
                 >
-                  <button
-                    type="button"
+                  <div
                     className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-bg/50 transition-colors"
                     onClick={() => setOpenRuleIdx(expanded ? -1 : idx)}
                   >
-                    <span className="text-text-dim text-xs w-6">{expanded ? "▼" : "▶"}</span>
-                    <span className="font-mono text-sm text-text flex-1 min-w-0 truncate">
-                      {rule.id || `rule-${idx + 1}`}
-                    </span>
-                    <span
-                      className={`shrink-0 text-xs font-semibold px-2 py-0.5 rounded-md border ${
-                        rule.effect === "allow"
-                          ? "bg-success-bg text-success border-success/20"
-                          : "bg-danger-bg text-danger border-danger/20"
-                      }`}
+                    <button
+                      type="button"
+                      className="text-text-dim text-xs w-6"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setOpenRuleIdx(expanded ? -1 : idx);
+                      }}
                     >
-                      {rule.effect}
-                    </span>
-                  </button>
+                      {expanded ? "▼" : "▶"}
+                    </button>
+                    <div className="flex-1 min-w-0">
+                      {editingRuleNameIdx === idx ? (
+                        <input
+                          type="text"
+                          autoFocus
+                          className="w-full rounded-md border border-border bg-bg px-2 py-1 text-sm font-mono text-text"
+                          value={rule.id}
+                          placeholder={`rule-${idx + 1}`}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => updateRule(idx, { id: e.target.value })}
+                          onBlur={() => setEditingRuleNameIdx(null)}
+                          onKeyDown={(e) => {
+                            e.stopPropagation();
+                            if (e.key === "Enter" || e.key === "Escape") {
+                              setEditingRuleNameIdx(null);
+                            }
+                          }}
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          className="font-mono text-sm text-text w-full text-left truncate hover:underline"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingRuleNameIdx(idx);
+                          }}
+                        >
+                          {rule.id || `rule-${idx + 1}`}
+                        </button>
+                      )}
+                    </div>
+                    <div
+                      className="shrink-0 inline-flex rounded-md border border-border overflow-hidden"
+                      role="group"
+                      aria-label="Rule effect"
+                    >
+                      <button
+                        type="button"
+                        className={`px-2.5 py-1 text-xs font-semibold transition-colors ${
+                          rule.effect === "allow"
+                            ? "bg-success-bg text-success"
+                            : "bg-bg text-text-dim hover:text-text"
+                        }`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          updateRule(idx, { effect: "allow" });
+                        }}
+                      >
+                        allow
+                      </button>
+                      <button
+                        type="button"
+                        className={`px-2.5 py-1 text-xs font-semibold border-l border-border transition-colors ${
+                          rule.effect === "deny"
+                            ? "bg-danger-bg text-danger"
+                            : "bg-bg text-text-dim hover:text-text"
+                        }`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          updateRule(idx, { effect: "deny" });
+                        }}
+                      >
+                        deny
+                      </button>
+                    </div>
+                  </div>
                   {expanded ? (
                     <div className="px-4 pb-4 pt-1 border-t border-border space-y-4 bg-bg/30">
                       <div className="flex justify-end">
@@ -602,27 +678,6 @@ function PolicyEditorBody({
                             Remove rule
                           </button>
                         ) : null}
-                      </div>
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <FormField label="Rule ID">
-                          <input
-                            type="text"
-                            className="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm font-mono text-text"
-                            value={rule.id}
-                            onChange={(e) => updateRule(idx, { id: e.target.value.trim() })}
-                          />
-                        </FormField>
-                        <FormField label="Effect">
-                          <Select
-                            value={rule.effect}
-                            onChange={(e) =>
-                              updateRule(idx, { effect: e.target.value as "allow" | "deny" })
-                            }
-                          >
-                            <option value="allow">allow</option>
-                            <option value="deny">deny</option>
-                          </Select>
-                        </FormField>
                       </div>
                       <FormField
                         label="HTTP methods"
@@ -719,6 +774,9 @@ export default function PoliciesTab() {
   const [versionsLoading, setVersionsLoading] = useState(false);
 
   const [grantSheet, setGrantSheet] = useState<GrantRow | null>(null);
+  const [grantSheetError, setGrantSheetError] = useState("");
+  const [openGrantPolicyLoading, setOpenGrantPolicyLoading] = useState(false);
+  const [hiddenRevokedGrantIds, setHiddenRevokedGrantIds] = useState<Set<string>>(new Set());
 
   const [policyEditor, setPolicyEditor] = useState<
     | null
@@ -1134,6 +1192,38 @@ export default function PoliciesTab() {
     }
   }
 
+  async function openPolicyFromGrant(g: GrantRow) {
+    setGrantSheetError("");
+    setOpenGrantPolicyLoading(true);
+    try {
+      setPanel("policies");
+      const existing = policies.find((p) => p.id === g.policy_id);
+      if (existing) {
+        setPolicySheet(existing);
+        return;
+      }
+      const resp = await apiFetch(`${base}/policies/${encodeURIComponent(g.policy_id)}`);
+      if (!resp.ok) {
+        setGrantSheetError(await readApiError(resp));
+        return;
+      }
+      const data = await resp.json();
+      setPolicySheet(policyFromAPIPayload(data));
+    } finally {
+      setOpenGrantPolicyLoading(false);
+    }
+  }
+
+  function removeRevokedGrantFromTable(g: GrantRow) {
+    if (!g.revoked_at) return;
+    setHiddenRevokedGrantIds((prev) => {
+      const next = new Set(prev);
+      next.add(g.id);
+      return next;
+    });
+    setGrantSheet(null);
+  }
+
   useEffect(() => {
     if (!policySheet) {
       setVersions([]);
@@ -1155,13 +1245,18 @@ export default function PoliciesTab() {
     };
   }, [policySheet, base]);
 
+  const visibleGrants = useMemo(
+    () => grants.filter((g) => !(g.revoked_at && hiddenRevokedGrantIds.has(g.id))),
+    [grants, hiddenRevokedGrantIds],
+  );
+
   const grantCountByPolicyId = useMemo(() => {
     const m = new Map<string, number>();
-    for (const g of grants) {
+    for (const g of visibleGrants) {
       m.set(g.policy_id, (m.get(g.policy_id) ?? 0) + 1);
     }
     return m;
-  }, [grants]);
+  }, [visibleGrants]);
 
   const policyColumns: Column<PolicySummary>[] = [
     {
@@ -1212,19 +1307,10 @@ export default function PoliciesTab() {
 
   const grantColumns: Column<GrantRow>[] = [
     {
-      key: "id",
-      header: "Grant",
+      key: "agent",
+      header: "Agent",
       render: (g) => (
-        <span className="font-mono text-xs text-text">{g.id}</span>
-      ),
-    },
-    {
-      key: "subject",
-      header: "Subject",
-      render: (g) => (
-        <span className="text-sm text-text">
-          {g.subject_type}:{g.subject_id.length > 12 ? `${g.subject_id.slice(0, 10)}…` : g.subject_id}
-        </span>
+        <span className="text-sm text-text">{g.subject_name || g.subject_id}</span>
       ),
     },
     {
@@ -1239,18 +1325,30 @@ export default function PoliciesTab() {
     {
       key: "state",
       header: "State",
-      render: (g) =>
+      render: (g) => (
         g.revoked_at ? (
           <StatusBadge status="revoked" />
         ) : (
           <StatusBadge status="active" />
-        ),
+        )
+      ),
+    },
+    {
+      key: "result_counts",
+      header: "Pass / Fail",
+      render: (g) => (
+        <span className="text-sm text-text-muted tabular-nums">
+          {(g.decision_allow_count ?? 0).toLocaleString()} / {(g.decision_deny_count ?? 0).toLocaleString()}
+        </span>
+      ),
     },
     {
       key: "granted_at",
       header: "Granted",
       render: (g) => (
-        <span className="text-sm text-text-dim">{timeAgo(g.granted_at)}</span>
+        <span className="text-sm text-text-dim">
+          {new Date(g.granted_at).toLocaleString()} · {timeAgo(g.granted_at)}
+        </span>
       ),
     },
   ];
@@ -1390,12 +1488,12 @@ export default function PoliciesTab() {
 
       {panel === "grants" && (
         <>
-          {grants.length === 0 && !engineOff ? (
+          {visibleGrants.length === 0 && !engineOff ? (
             <EmptyState message='No grants yet. Use "New grant" above or agent-vault grants create.' />
-          ) : grants.length > 0 ? (
+          ) : visibleGrants.length > 0 ? (
             <DataTable
               columns={grantColumns}
-              data={grants}
+              data={visibleGrants}
               rowKey={(g) => g.id}
               onRowClick={(g) => setGrantSheet(g)}
             />
@@ -1650,9 +1748,12 @@ export default function PoliciesTab() {
 
       <Sheet
         open={grantSheet !== null}
-        onClose={() => setGrantSheet(null)}
+        onClose={() => {
+          setGrantSheet(null);
+          setGrantSheetError("");
+        }}
         eyebrow="Grant"
-        title={grantSheet?.id ?? ""}
+        title={grantSheet ? `${grantSheet.subject_name || grantSheet.subject_id} → ${grantSheet.policy_id}` : ""}
         widthClass="max-w-[520px]"
         headerExtra={
           grantSheet && (
@@ -1666,14 +1767,30 @@ export default function PoliciesTab() {
           )
         }
         footer={
-          grantSheet && !grantSheet.revoked_at ? (
-            <button
-              type="button"
-              className="px-5 py-2.5 rounded-lg text-sm font-semibold border border-danger text-danger hover:bg-danger/10 transition-colors"
-              onClick={() => setRevokeGrantId(grantSheet.id)}
-            >
-              Revoke grant
-            </button>
+          grantSheet ? (
+            <div className="flex w-full items-center justify-end gap-2">
+              {!grantSheet.revoked_at ? (
+                <button
+                  type="button"
+                  className="px-5 py-2.5 rounded-lg text-sm font-semibold border border-danger text-danger hover:bg-danger/10 transition-colors"
+                  onClick={() => setRevokeGrantId(grantSheet.id)}
+                >
+                  Revoke grant
+                </button>
+              ) : null}
+              <button
+                type="button"
+                disabled={!grantSheet.revoked_at}
+                className={`px-5 py-2.5 rounded-lg text-sm font-semibold border border-border text-text-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${
+                  grantSheet.revoked_at
+                    ? "bg-red-500 text-white border-red-500 hover:bg-red-600/90"
+                    : "hover:bg-bg-subtle"
+                }`}
+                onClick={() => removeRevokedGrantFromTable(grantSheet)}
+              >
+                Delete
+              </button>
+            </div>
           ) : undefined
         }
       >
@@ -1681,22 +1798,58 @@ export default function PoliciesTab() {
           <dl className="text-sm space-y-3">
             <div>
               <dt className="text-text-dim text-xs uppercase tracking-wide">Subject</dt>
-              <dd className="font-mono text-text mt-0.5">
-                {grantSheet.subject_type}:{grantSheet.subject_id}
+              <dd className="text-text mt-0.5">
+                {grantSheet.subject_name || grantSheet.subject_id}
+                <span className="text-text-dim ml-2">({grantSheet.subject_type})</span>
               </dd>
             </div>
             <div>
               <dt className="text-text-dim text-xs uppercase tracking-wide">Policy</dt>
-              <dd className="font-mono text-text mt-0.5">
-                {grantSheet.policy_id}@{grantSheet.policy_version || "latest"}
+              <dd className="mt-0.5 flex items-center gap-3">
+                <button
+                  type="button"
+                  className="font-mono text-sm text-brand hover:underline"
+                  onClick={() => openPolicyFromGrant(grantSheet)}
+                  disabled={openGrantPolicyLoading}
+                >
+                  {grantSheet.policy_id}@{grantSheet.policy_version || "latest"}
+                </button>
+                {openGrantPolicyLoading ? (
+                  <span className="text-xs text-text-dim">Opening…</span>
+                ) : null}
               </dd>
             </div>
+            {hasGrantConditions(grantSheet.conditions) ? (
+              <div>
+                <dt className="text-text-dim text-xs uppercase tracking-wide">Conditions</dt>
+                <dd className="mt-2 space-y-2">
+                  {Object.entries(grantSheet.conditions ?? {}).map(([k, v]) => (
+                    <div
+                      key={k}
+                      className="rounded-lg border border-border bg-bg-subtle px-3 py-2 flex items-start justify-between gap-3"
+                    >
+                      <span className="text-xs font-semibold uppercase tracking-wide text-text-dim">
+                        {conditionLabel(k)}
+                      </span>
+                      <span className="text-sm text-text text-right">
+                        {Array.isArray(v)
+                          ? v.join(", ")
+                          : typeof v === "object" && v !== null
+                            ? Object.entries(v as Record<string, unknown>)
+                                .map(([subKey, subVal]) => `${conditionLabel(subKey)}: ${String(subVal)}`)
+                                .join(" · ")
+                            : String(v)}
+                      </span>
+                    </div>
+                  ))}
+                </dd>
+              </div>
+            ) : null}
             <div>
-              <dt className="text-text-dim text-xs uppercase tracking-wide">Conditions</dt>
-              <dd className="mt-0.5">
-                <pre className="text-xs font-mono bg-bg border border-border rounded-lg p-3 overflow-x-auto text-text-muted">
-                  {JSON.stringify(grantSheet.conditions ?? {}, null, 2)}
-                </pre>
+              <dt className="text-text-dim text-xs uppercase tracking-wide">Pass / Fail</dt>
+              <dd className="text-text mt-0.5 tabular-nums">
+                {(grantSheet.decision_allow_count ?? 0).toLocaleString()} /{" "}
+                {(grantSheet.decision_deny_count ?? 0).toLocaleString()}
               </dd>
             </div>
             <div>
@@ -1706,6 +1859,7 @@ export default function PoliciesTab() {
                 {grantSheet.granted_by}
               </dd>
             </div>
+            {grantSheetError ? <p className="text-sm text-danger">{grantSheetError}</p> : null}
             {grantSheet.expires_at && (
               <div>
                 <dt className="text-text-dim text-xs uppercase tracking-wide">Expires</dt>

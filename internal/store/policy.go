@@ -66,6 +66,13 @@ type PolicyAuditRow struct {
 	OccurredAt time.Time
 }
 
+// GrantDecisionStat aggregates allow/deny decision counts for one grant.
+type GrantDecisionStat struct {
+	GrantID    string
+	AllowCount int
+	DenyCount  int
+}
+
 // ListPolicyAuditOpts filters policy_audit queries.
 type ListPolicyAuditOpts struct {
 	VaultID   string
@@ -102,6 +109,7 @@ type PolicyStore interface {
 	// Policy audit
 	InsertPolicyAudit(ctx context.Context, row PolicyAuditRow) error
 	ListPolicyAudit(ctx context.Context, opts ListPolicyAuditOpts) ([]PolicyAuditRow, error)
+	ListGrantDecisionStats(ctx context.Context, vaultID string) ([]GrantDecisionStat, error)
 
 	// Quota counters (used by policy.QuotaStore adapter)
 	IncrementQuotaBucket(ctx context.Context, grantID, bucketKey string, delta int, expiresAt time.Time) (int, error)
@@ -400,6 +408,34 @@ func (s *SQLiteStore) ListPolicyAudit(ctx context.Context, opts ListPolicyAuditO
 		}
 		r.OccurredAt, _ = time.Parse(time.RFC3339, occurred)
 		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) ListGrantDecisionStats(ctx context.Context, vaultID string) ([]GrantDecisionStat, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT grant_id,
+		        SUM(CASE WHEN decision = 'allow' THEN 1 ELSE 0 END) AS allow_count,
+		        SUM(CASE WHEN decision = 'deny' THEN 1 ELSE 0 END) AS deny_count
+		   FROM policy_audit
+		  WHERE vault_id = ?
+		    AND grant_id != ''
+		    AND decision IN ('allow', 'deny')
+		  GROUP BY grant_id`,
+		vaultID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []GrantDecisionStat
+	for rows.Next() {
+		var s GrantDecisionStat
+		if err := rows.Scan(&s.GrantID, &s.AllowCount, &s.DenyCount); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
 	}
 	return out, rows.Err()
 }
