@@ -74,6 +74,11 @@ type Session struct {
 	ExpiresAt *time.Time // nil = never expires
 	CreatedAt time.Time
 
+	// MintedByUserID is set only for vault-scoped rows whose proxy actor is an
+	// agent (acting identity) minted by a human via POST /v1/sessions with
+	// acting_agent_name or acting_agent_id. Empty for user-minted scoped sessions.
+	MintedByUserID string
+
 	// User-session sliding-expiry fields. Populated by CreateUserSession;
 	// left zero for scoped sessions and agent tokens.
 	PublicID      string        // short opaque handle for revoke endpoint; empty for scoped/agent
@@ -110,14 +115,16 @@ type CreateUserSessionParams struct {
 }
 
 // CreateScopedSessionParams carries fields for POST /v1/sessions minted
-// tokens. Exactly one of UserID or AgentID must be set (the minting
-// principal) so proxy policy evaluation can resolve an actor.
+// tokens. Exactly one of UserID or AgentID must be set: the proxy principal
+// for policy evaluation (user row or acting agent row). When AgentID is set
+// and UserID is empty, MintedByUserID must be the delegating human's user id.
 type CreateScopedSessionParams struct {
-	VaultID   string
-	VaultRole string
-	UserID    string // minting user; empty when AgentID is set
-	AgentID   string // minting agent; empty when UserID is set
-	ExpiresAt *time.Time
+	VaultID          string
+	VaultRole        string
+	UserID           string // non-empty: user is the proxy principal
+	AgentID          string // non-empty with UserID empty: agent is the proxy principal (delegated)
+	MintedByUserID   string // required when UserID is empty and AgentID is set; otherwise empty
+	ExpiresAt        *time.Time
 }
 
 // User represents a human user account.

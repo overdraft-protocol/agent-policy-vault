@@ -28,8 +28,8 @@ func TestOpenAndMigrate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("querying schema_migrations: %v", err)
 	}
-	if version != 47 {
-		t.Fatalf("expected migration version 47, got %d", version)
+	if version != 48 {
+		t.Fatalf("expected migration version 48, got %d", version)
 	}
 }
 
@@ -395,6 +395,106 @@ func TestCreateScopedSessionRequiresMintingActor(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error when both user_id and agent_id are empty")
+	}
+}
+
+func TestCreateScopedSessionDelegatedRequiresMintedBy(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	ns, err := s.GetVault(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetVault: %v", err)
+	}
+	ag, err := s.CreateAgent(ctx, "delegatebot", "creator", "member")
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if err := s.GrantVaultRole(ctx, ag.ID, "agent", ns.ID, "proxy"); err != nil {
+		t.Fatalf("GrantVaultRole: %v", err)
+	}
+	expires := time.Now().Add(time.Hour).UTC()
+	_, err = s.CreateScopedSession(ctx, CreateScopedSessionParams{
+		VaultID:   ns.ID,
+		VaultRole: "proxy",
+		AgentID:   ag.ID,
+		ExpiresAt: &expires,
+	})
+	if err == nil {
+		t.Fatal("expected error when agent-acting scoped session has no minted_by_user_id")
+	}
+}
+
+func TestCreateScopedSessionMintedByRejectedWithUserPrincipal(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	ns, err := s.GetVault(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetVault: %v", err)
+	}
+	u, err := s.CreateUser(ctx, "mintedby-user@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	expires := time.Now().Add(time.Hour).UTC()
+	_, err = s.CreateScopedSession(ctx, CreateScopedSessionParams{
+		VaultID:        ns.ID,
+		VaultRole:      "proxy",
+		UserID:         u.ID,
+		MintedByUserID: u.ID,
+		ExpiresAt:      &expires,
+	})
+	if err == nil {
+		t.Fatal("expected error when minted_by_user_id is set with user_id principal")
+	}
+}
+
+func TestCreateScopedSessionDelegatedRoundTrip(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	ns, err := s.GetVault(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetVault: %v", err)
+	}
+	u, err := s.CreateUser(ctx, "delegator@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if err := s.GrantVaultRole(ctx, u.ID, "user", ns.ID, "admin"); err != nil {
+		t.Fatalf("GrantVaultRole user: %v", err)
+	}
+	ag, err := s.CreateAgent(ctx, "hermes", u.ID, "member")
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if err := s.GrantVaultRole(ctx, ag.ID, "agent", ns.ID, "member"); err != nil {
+		t.Fatalf("GrantVaultRole agent: %v", err)
+	}
+	expires := time.Now().Add(time.Hour).UTC()
+	sess, err := s.CreateScopedSession(ctx, CreateScopedSessionParams{
+		VaultID:        ns.ID,
+		VaultRole:      "proxy",
+		AgentID:        ag.ID,
+		MintedByUserID: u.ID,
+		ExpiresAt:      &expires,
+	})
+	if err != nil {
+		t.Fatalf("CreateScopedSession: %v", err)
+	}
+	got, err := s.GetSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if got.UserID != "" {
+		t.Fatalf("expected empty user_id, got %q", got.UserID)
+	}
+	if got.AgentID != ag.ID {
+		t.Fatalf("agent_id: want %s got %q", ag.ID, got.AgentID)
+	}
+	if got.MintedByUserID != u.ID {
+		t.Fatalf("minted_by: want %s got %q", u.ID, got.MintedByUserID)
+	}
+	if got.VaultRole != "proxy" {
+		t.Fatalf("vault_role: want proxy got %q", got.VaultRole)
 	}
 }
 

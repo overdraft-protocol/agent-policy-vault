@@ -117,7 +117,8 @@ func runCmdRunE(cmd *cobra.Command, args []string) error {
 	//      retrying on session expiry. Shared with `vault token`.
 	role, _ := cmd.Flags().GetString("role")
 	ttl, _ := cmd.Flags().GetInt("ttl")
-	vault, scopedToken, err := mintScopedSession(cmd, sess, addr, role, ttl)
+	acting := actingAgentNameForSession(args[0])
+	vault, scopedToken, err := mintScopedSession(cmd, sess, addr, role, ttl, acting)
 	if err != nil {
 		return err
 	}
@@ -189,6 +190,20 @@ func agentSkillDir(cmd string) (agentName, baseDir string, ok bool) {
 		}
 	}
 	return "", "", false
+}
+
+// actingAgentNameForSession returns the agent name sent as acting_agent_name
+// when minting a scoped session, if argv[0] matches a known agent CLI basename.
+func actingAgentNameForSession(cmdPath string) string {
+	base := filepath.Base(cmdPath)
+	for _, a := range knownAgents {
+		for _, b := range a.bases {
+			if base == b {
+				return b
+			}
+		}
+	}
+	return ""
 }
 
 // maybeInstallSkills installs both Agent Vault skills (CLI and HTTP) under
@@ -457,7 +472,7 @@ func augmentEnvWithMITM(env []string, addr, token, vault, caPath string) ([]stri
 // re-auth would be a UX regression, and the user's earlier choice is
 // still valid because vault membership is rechecked server-side when
 // requestScopedSession fires.
-func mintScopedSession(cmd *cobra.Command, sess *session.ClientSession, addr, role string, ttl int) (vault, scopedToken string, err error) {
+func mintScopedSession(cmd *cobra.Command, sess *session.ClientSession, addr, role string, ttl int, actingAgentName string) (vault, scopedToken string, err error) {
 	err = withReauthRetry(sess, addr, func(s *session.ClientSession) error {
 		if vault == "" {
 			v, verr := resolveVaultForRun(cmd, addr, s.Token)
@@ -466,7 +481,7 @@ func mintScopedSession(cmd *cobra.Command, sess *session.ClientSession, addr, ro
 			}
 			vault = v
 		}
-		token, terr := requestScopedSession(addr, s.Token, vault, role, ttl)
+		token, terr := requestScopedSession(addr, s.Token, vault, role, ttl, actingAgentName)
 		if terr != nil {
 			return terr
 		}
@@ -478,13 +493,16 @@ func mintScopedSession(cmd *cobra.Command, sess *session.ClientSession, addr, ro
 
 // requestScopedSession calls the server to create a vault-scoped session
 // and returns the scoped token.
-func requestScopedSession(addr, adminToken, vault, role string, ttlSeconds int) (string, error) {
+func requestScopedSession(addr, adminToken, vault, role string, ttlSeconds int, actingAgentName string) (string, error) {
 	body := map[string]any{"vault": vault}
 	if role != "" {
 		body["vault_role"] = role
 	}
 	if ttlSeconds > 0 {
 		body["ttl_seconds"] = ttlSeconds
+	}
+	if actingAgentName != "" {
+		body["acting_agent_name"] = actingAgentName
 	}
 	reqBody, err := json.Marshal(body)
 	if err != nil {

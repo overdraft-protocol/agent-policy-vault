@@ -33,7 +33,8 @@ Example:
 
 		role, _ := cmd.Flags().GetString("role")
 		ttl, _ := cmd.Flags().GetInt("ttl")
-		_, token, err := mintScopedSession(cmd, sess, addr, role, ttl)
+		acting, _ := cmd.Flags().GetString("acting-agent")
+		_, token, err := mintScopedSession(cmd, sess, addr, role, ttl, acting)
 		if err != nil {
 			return err
 		}
@@ -46,6 +47,7 @@ Example:
 func init() {
 	tokenCmd.Flags().String("address", "", "Agent Vault server address (defaults to session address)")
 	tokenCmd.Flags().String("role", "", "Vault role for the session (proxy, member, admin; default: proxy)")
+	tokenCmd.Flags().String("acting-agent", "", "registered agent name for an agent-acting scoped token (matches policy grants on that agent)")
 	tokenCmd.Flags().Int("ttl", 0, "Session TTL in seconds (300–604800; default: server default 24h)")
 
 	vaultCmd.AddCommand(tokenCmd)

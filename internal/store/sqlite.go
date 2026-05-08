@@ -796,6 +796,12 @@ func (s *SQLiteStore) CreateScopedSession(ctx context.Context, p CreateScopedSes
 	if p.UserID == "" && p.AgentID == "" {
 		return nil, fmt.Errorf("CreateScopedSession: user_id or agent_id is required")
 	}
+	if p.UserID != "" && p.MintedByUserID != "" {
+		return nil, fmt.Errorf("CreateScopedSession: minted_by_user_id must be empty when user_id is set")
+	}
+	if p.UserID == "" && p.AgentID != "" && p.MintedByUserID == "" {
+		return nil, fmt.Errorf("CreateScopedSession: agent-acting scoped sessions require minted_by_user_id")
+	}
 	if p.VaultID == "" {
 		return nil, fmt.Errorf("CreateScopedSession: vault_id is required")
 	}
@@ -816,42 +822,47 @@ func (s *SQLiteStore) CreateScopedSession(ctx context.Context, p CreateScopedSes
 	if p.AgentID != "" {
 		agentArg = p.AgentID
 	}
+	var mintedByArg any
+	if p.MintedByUserID != "" {
+		mintedByArg = p.MintedByUserID
+	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, vault_id, vault_role, user_id, agent_id, expires_at, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		tokenHash, p.VaultID, p.VaultRole, userArg, agentArg, expiresAtStr, now.Format(time.DateTime),
+		`INSERT INTO sessions (id, vault_id, vault_role, user_id, agent_id, minted_by_user_id, expires_at, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		tokenHash, p.VaultID, p.VaultRole, userArg, agentArg, mintedByArg, expiresAtStr, now.Format(time.DateTime),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating scoped session: %w", err)
 	}
 
 	return &Session{
-		ID:        rawToken,
-		UserID:    p.UserID,
-		AgentID:   p.AgentID,
-		VaultID:   p.VaultID,
-		VaultRole: p.VaultRole,
-		ExpiresAt: utcTimePtr(p.ExpiresAt),
-		CreatedAt: now,
+		ID:               rawToken,
+		UserID:           p.UserID,
+		AgentID:          p.AgentID,
+		MintedByUserID:   p.MintedByUserID,
+		VaultID:          p.VaultID,
+		VaultRole:        p.VaultRole,
+		ExpiresAt:        utcTimePtr(p.ExpiresAt),
+		CreatedAt:        now,
 	}, nil
 }
 
 func (s *SQLiteStore) GetSession(ctx context.Context, rawToken string) (*Session, error) {
 	tokenHash := hashSessionToken(rawToken)
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, user_id, vault_id, agent_id, vault_role, expires_at, created_at,
+		`SELECT id, user_id, vault_id, agent_id, minted_by_user_id, vault_role, expires_at, created_at,
 		        last_used_at, idle_ttl_seconds, device_label, last_ip, last_user_agent, public_id
 		 FROM sessions WHERE id = ?`, tokenHash,
 	)
 
 	var sess Session
 	var storedID string
-	var userID, vaultID, agentID, vaultRole, expiresAt sql.NullString
+	var userID, vaultID, agentID, mintedByUserID, vaultRole, expiresAt sql.NullString
 	var lastUsedAt, deviceLabel, lastIP, lastUserAgent, publicID sql.NullString
 	var idleSecs sql.NullInt64
 	var createdAt string
-	if err := row.Scan(&storedID, &userID, &vaultID, &agentID, &vaultRole, &expiresAt, &createdAt,
+	if err := row.Scan(&storedID, &userID, &vaultID, &agentID, &mintedByUserID, &vaultRole, &expiresAt, &createdAt,
 		&lastUsedAt, &idleSecs, &deviceLabel, &lastIP, &lastUserAgent, &publicID); err != nil {
 		return nil, err
 	}
@@ -860,6 +871,7 @@ func (s *SQLiteStore) GetSession(ctx context.Context, rawToken string) (*Session
 	sess.UserID = userID.String
 	sess.VaultID = vaultID.String
 	sess.AgentID = agentID.String
+	sess.MintedByUserID = mintedByUserID.String
 	sess.VaultRole = vaultRole.String
 	if expiresAt.Valid {
 		t, _ := time.Parse(time.DateTime, expiresAt.String)

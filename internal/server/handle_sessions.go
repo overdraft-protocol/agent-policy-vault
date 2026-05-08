@@ -5,15 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
 type scopedSessionRequest struct {
-	Vault      string `json:"vault"`
-	VaultRole  string `json:"vault_role"`
-	TTLSeconds *int   `json:"ttl_seconds,omitempty"`
+	Vault            string `json:"vault"`
+	VaultRole        string `json:"vault_role"`
+	TTLSeconds       *int   `json:"ttl_seconds,omitempty"`
+	ActingAgentName  string `json:"acting_agent_name,omitempty"`
+	ActingAgentID    string `json:"acting_agent_id,omitempty"`
 }
 
 type scopedSessionResponse struct {
@@ -45,6 +48,13 @@ func (s *Server) handleScopedSession(w http.ResponseWriter, r *http.Request) {
 			))
 			return
 		}
+	}
+
+	actingName := strings.TrimSpace(req.ActingAgentName)
+	actingID := strings.TrimSpace(req.ActingAgentID)
+	if actingName != "" && actingID != "" {
+		jsonError(w, http.StatusBadRequest, "acting_agent_name and acting_agent_id are mutually exclusive")
+		return
 	}
 
 	ctx := r.Context()
@@ -82,28 +92,78 @@ func (s *Server) handleScopedSession(w http.ResponseWriter, r *http.Request) {
 		expiresAt = &t
 	}
 
-	userID, agentID := parentSess.UserID, parentSess.AgentID
-	if userID == "" && agentID == "" {
+	parentUserID, parentAgentID := parentSess.UserID, parentSess.AgentID
+	if parentUserID == "" && parentAgentID == "" {
 		actor, aerr := s.actorFromSession(ctx, parentSess)
 		if aerr == nil && actor != nil {
 			if actor.Type == "user" {
-				userID = actor.ID
+				parentUserID = actor.ID
 			} else if actor.Type == "agent" {
-				agentID = actor.ID
+				parentAgentID = actor.ID
 			}
 		}
 	}
-	if userID == "" && agentID == "" {
+
+	if actingName != "" || actingID != "" {
+		if parentUserID == "" {
+			jsonError(w, http.StatusForbidden, "Agent-acting scoped tokens (acting_agent_name / acting_agent_id) require a user-authenticated parent session. Mint a normal scoped token from your user login, or omit acting_agent_* when using an agent token.")
+			return
+		}
+		var targetAgent *store.Agent
+		var aerr error
+		if actingID != "" {
+			targetAgent, aerr = s.store.GetAgentByID(ctx, actingID)
+		} else {
+			targetAgent, aerr = s.store.GetAgentByName(ctx, actingName)
+			if (aerr != nil || targetAgent == nil) && actingName != strings.ToLower(actingName) {
+				targetAgent, aerr = s.store.GetAgentByName(ctx, strings.ToLower(actingName))
+			}
+		}
+		if aerr != nil || targetAgent == nil {
+			jsonError(w, http.StatusNotFound, "Acting agent not found")
+			return
+		}
+		agentVR, err := s.store.GetVaultRole(ctx, targetAgent.ID, ns.ID)
+		if err != nil || agentVR == "" {
+			jsonError(w, http.StatusForbidden, "Acting agent is not a member of this vault")
+			return
+		}
+		finalRole := cappedRole
+		if roleRank[agentVR] < roleRank[finalRole] {
+			finalRole = agentVR
+		}
+		sess, err := s.store.CreateScopedSession(ctx, store.CreateScopedSessionParams{
+			VaultID:        ns.ID,
+			VaultRole:      finalRole,
+			UserID:         "",
+			AgentID:        targetAgent.ID,
+			MintedByUserID: parentUserID,
+			ExpiresAt:      expiresAt,
+		})
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "Failed to create scoped session")
+			return
+		}
+		jsonOK(w, scopedSessionResponse{
+			Token:     sess.ID,
+			ExpiresAt: formatExpiresAt(sess.ExpiresAt),
+			AVAddr:    s.baseURL,
+		})
+		return
+	}
+
+	if parentUserID == "" && parentAgentID == "" {
 		jsonError(w, http.StatusForbidden, "Cannot mint a delegated session: the current token has no associated user or agent. Re-authenticate or use a user or agent session.")
 		return
 	}
 
 	sess, err := s.store.CreateScopedSession(ctx, store.CreateScopedSessionParams{
-		VaultID:   ns.ID,
-		VaultRole: cappedRole,
-		UserID:    userID,
-		AgentID:   agentID,
-		ExpiresAt: expiresAt,
+		VaultID:        ns.ID,
+		VaultRole:      cappedRole,
+		UserID:         parentUserID,
+		AgentID:        parentAgentID,
+		MintedByUserID: "",
+		ExpiresAt:      expiresAt,
 	})
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "Failed to create scoped session")

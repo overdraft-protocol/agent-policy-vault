@@ -81,6 +81,21 @@ func TestResolveForProxy_ScopedSession_NoHint(t *testing.T) {
 	}
 }
 
+func TestResolveForProxy_ScopedDelegatedAgent(t *testing.T) {
+	f := newFakeSessionStore()
+	f.putVault("v1", "default")
+	f.sessions["tok"] = &store.Session{ID: "tok", AgentID: "a1", UserID: "", MintedByUserID: "u9", VaultID: "v1", VaultRole: "proxy"}
+
+	r := NewStoreSessionResolver(f)
+	scope, err := r.ResolveForProxy(context.Background(), "tok", "")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if scope.UserID != "" || scope.AgentID != "a1" || scope.VaultRole != "proxy" {
+		t.Fatalf("scope = %+v", scope)
+	}
+}
+
 func TestResolveForProxy_ScopedSession_MatchingHint(t *testing.T) {
 	f := newFakeSessionStore()
 	f.putVault("v1", "default")

@@ -182,15 +182,22 @@ func (m *mockStore) CreateScopedSession(_ context.Context, p store.CreateScopedS
 	if p.UserID == "" && p.AgentID == "" {
 		return nil, fmt.Errorf("CreateScopedSession: user_id or agent_id is required")
 	}
+	if p.UserID != "" && p.MintedByUserID != "" {
+		return nil, fmt.Errorf("CreateScopedSession: minted_by_user_id must be empty when user_id is set")
+	}
+	if p.UserID == "" && p.AgentID != "" && p.MintedByUserID == "" {
+		return nil, fmt.Errorf("CreateScopedSession: agent-acting scoped sessions require minted_by_user_id")
+	}
 	m.sessionCounter++
 	s := &store.Session{
-		ID:        fmt.Sprintf("scoped-session-id-%d", m.sessionCounter),
-		VaultID:   p.VaultID,
-		VaultRole: p.VaultRole,
-		UserID:    p.UserID,
-		AgentID:   p.AgentID,
-		ExpiresAt: p.ExpiresAt,
-		CreatedAt: time.Now(),
+		ID:               fmt.Sprintf("scoped-session-id-%d", m.sessionCounter),
+		VaultID:          p.VaultID,
+		VaultRole:        p.VaultRole,
+		UserID:           p.UserID,
+		AgentID:          p.AgentID,
+		MintedByUserID:   p.MintedByUserID,
+		ExpiresAt:        p.ExpiresAt,
+		CreatedAt:        time.Now(),
 	}
 	m.sessions[s.ID] = s
 	return s, nil
@@ -710,18 +717,29 @@ func (m *mockStore) ListActorGrants(_ context.Context, actorID string) ([]store.
 	return grants, nil
 }
 
-func (m *mockStore) HasVaultAccess(_ context.Context, userID, vaultID string) (bool, error) {
-	if m.grants != nil && m.grants[userID] != nil {
-		_, ok := m.grants[userID][vaultID]
-		return ok, nil
+func (m *mockStore) HasVaultAccess(_ context.Context, actorID, vaultID string) (bool, error) {
+	if m.grants != nil && m.grants[actorID] != nil {
+		if _, ok := m.grants[actorID][vaultID]; ok {
+			return true, nil
+		}
+	}
+	for _, g := range m.agentVaultGrants {
+		if g.ActorID == actorID && g.VaultID == vaultID {
+			return true, nil
+		}
 	}
 	return false, nil
 }
 
-func (m *mockStore) GetVaultRole(_ context.Context, userID, vaultID string) (string, error) {
-	if m.grants != nil && m.grants[userID] != nil {
-		if role, ok := m.grants[userID][vaultID]; ok {
+func (m *mockStore) GetVaultRole(_ context.Context, actorID, vaultID string) (string, error) {
+	if m.grants != nil && m.grants[actorID] != nil {
+		if role, ok := m.grants[actorID][vaultID]; ok {
 			return role, nil
+		}
+	}
+	for _, g := range m.agentVaultGrants {
+		if g.ActorID == actorID && g.VaultID == vaultID {
+			return g.Role, nil
 		}
 	}
 	return "", fmt.Errorf("no grant found")
@@ -1954,6 +1972,128 @@ func TestScopedSessionSuccess(t *testing.T) {
 	}
 	if scopedSess.AgentID != "" {
 		t.Fatalf("expected empty agent_id on user-minted scoped session, got %q", scopedSess.AgentID)
+	}
+}
+
+func TestScopedSessionActingAgentNameSuccess(t *testing.T) {
+	ms, token := setupMockStoreWithSession(t)
+	_, err := ms.CreateAgent(context.Background(), "hermes", "owner-user-id", "member")
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if err := ms.GrantVaultRole(context.Background(), "agent-hermes", "agent", "root-ns-id", "member"); err != nil {
+		t.Fatalf("GrantVaultRole: %v", err)
+	}
+	srv := newTestServer(withStore(ms))
+
+	body := `{"vault":"default","acting_agent_name":"hermes"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp scopedSessionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	scopedSess := ms.sessions[resp.Token]
+	if scopedSess == nil {
+		t.Fatal("scoped session not found")
+	}
+	if scopedSess.UserID != "" {
+		t.Fatalf("expected empty user_id, got %q", scopedSess.UserID)
+	}
+	if scopedSess.AgentID != "agent-hermes" {
+		t.Fatalf("expected agent_id agent-hermes, got %q", scopedSess.AgentID)
+	}
+	if scopedSess.MintedByUserID != "owner-user-id" {
+		t.Fatalf("expected minted_by owner-user-id, got %q", scopedSess.MintedByUserID)
+	}
+}
+
+func TestScopedSessionActingAgentMutuallyExclusive(t *testing.T) {
+	ms, token := setupMockStoreWithSession(t)
+	srv := newTestServer(withStore(ms))
+	body := `{"vault":"default","acting_agent_name":"x","acting_agent_id":"y"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScopedSessionActingAgentRequiresUserSession(t *testing.T) {
+	ms := newMockStore()
+	ms.users["owner@test.com"] = &store.User{
+		ID: "owner-user-id", Email: "owner@test.com",
+		Role: "owner", IsActive: true,
+	}
+	ms.GrantVaultRole(context.Background(), "owner-user-id", "user", "root-ns-id", "admin")
+	if _, err := ms.CreateAgent(context.Background(), "bot", "owner-user-id", "member"); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if err := ms.GrantVaultRole(context.Background(), "agent-bot", "agent", "root-ns-id", "member"); err != nil {
+		t.Fatalf("GrantVaultRole: %v", err)
+	}
+	agentTok, err := ms.CreateAgentToken(context.Background(), "agent-bot", tp(time.Now().Add(time.Hour)))
+	if err != nil {
+		t.Fatalf("CreateAgentToken: %v", err)
+	}
+	srv := newTestServer(withStore(ms))
+	body := `{"vault":"default","acting_agent_name":"bot"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+agentTok.ID)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScopedSessionActingAgentNotInVault(t *testing.T) {
+	ms, token := setupMockStoreWithSession(t)
+	if _, err := ms.CreateAgent(context.Background(), "orphan", "owner-user-id", "member"); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	srv := newTestServer(withStore(ms))
+	body := `{"vault":"default","acting_agent_name":"orphan"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScopedSessionActingAgentRoleCappedByAgentGrant(t *testing.T) {
+	ms, token := setupMockStoreWithSession(t)
+	if _, err := ms.CreateAgent(context.Background(), "limited", "owner-user-id", "member"); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if err := ms.GrantVaultRole(context.Background(), "agent-limited", "agent", "root-ns-id", "proxy"); err != nil {
+		t.Fatalf("GrantVaultRole: %v", err)
+	}
+	srv := newTestServer(withStore(ms))
+	body := `{"vault":"default","vault_role":"admin","acting_agent_name":"limited"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp scopedSessionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	scopedSess := ms.sessions[resp.Token]
+	if scopedSess.VaultRole != "proxy" {
+		t.Fatalf("expected vault_role capped to proxy, got %q", scopedSess.VaultRole)
 	}
 }
 
